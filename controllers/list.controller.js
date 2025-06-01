@@ -1,4 +1,4 @@
-const Invitado = require('../models/Invitado'); // Asegúrate de que la ruta sea correcta
+const Invitado = require('../models/invitado.model'); // Asegúrate de que la ruta sea correcta
 
 // Función auxiliar para manejar errores de manera consistente
 const handleErrors = (res, error, message = "Error interno del servidor") => {

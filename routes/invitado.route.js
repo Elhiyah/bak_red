@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const invitadoController = require('../controllers/invitadoController'); // Ajusta la ruta
+const invitadoController = require('../controllers/list.controller'); // Ajusta la ruta
 
 // Rutas para invitados
 router.post('/invitados', invitadoController.crearInvitado);

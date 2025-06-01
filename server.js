@@ -72,11 +72,9 @@ const eventsRoutes = require('./routes/events.routes');
 app.use('/api/events', eventsRoutes);
 console.log('✅ Events routes');
 
-// === INICIO DE INTEGRACIÓN DE RUTAS DE INVITADOS ===
-const invitadoRoutes = require('./routes/invitado.route'); // Asegúrate de que esta ruta sea correcta
-app.use('/api', invitadoRoutes); // Montamos las rutas de invitado.route.js
-console.log('✅ Invitado routes');
-// === FIN DE INTEGRACIÓN DE RUTAS DE INVITADOS ===
+const invitadoRoutes = require('./routes/invitado.route');
+app.use('/api/invitado', invitadoRoutes); 
+console.log('✅ Invitado routes'); 
 
 // Si tienes las rutas de mega eventos, descomenta:
 // const megaEventsRoutes = require('./routes/MegaEvents.routes');
@@ -92,7 +90,7 @@ app.get('/health', (req, res) => {
         success: true,
         message: 'Servidor UNI2 funcionando correctamente',
         timestamp: new Date().toISOString(),
-        routes: ['auth', 'users', 'events', 'invitados'], // Añadido 'invitados'
+        routes: ['auth', 'users', 'events'],
         version: '2.0'
     });
 });
@@ -105,8 +103,7 @@ app.get('/api/test', (req, res) => {
         endpoints: {
             auth: '/api/auth',
             users: '/api/users',
-            events: '/api/events',
-            invitados: '/api/invitados' // Añadido 'invitados'
+            events: '/api/events'
         },
         timestamp: new Date().toISOString()
     });
@@ -126,17 +123,7 @@ app.use((req, res, next) => {
             'POST /api/auth/login',
             'POST /api/auth/register',
             'GET /api/events',
-            'POST /api/events',
-            // Añadidos los endpoints de invitados para la lista de disponibles
-            'POST /api/invitados',
-            'GET /api/eventos/:evento_id/invitados',
-            'GET /api/invitados/:id',
-            'PUT /api/invitados/:id',
-            'DELETE /api/invitados/:id',
-            'PUT /api/invitados/:id/confirmar',
-            'PUT /api/invitados/:id/checkin',
-            'PUT /api/invitados/:id/checkout',
-            'GET /api/eventos/:evento_id/estadisticas'
+            'POST /api/events'
         ]
     });
 });
@@ -176,12 +163,11 @@ app.listen(PORT, () => {
     console.log(`📍 Puerto: ${PORT}`);
     console.log(`🌐 Ambiente: ${process.env.NODE_ENV || 'development'}`);
     console.log('\n📊 ENDPOINTS PRINCIPALES:');
-    console.log(`    💊 Health: http://localhost:${PORT}/health`);
-    console.log(`    🧪 Test: http://localhost:${PORT}/api/test`);
-    console.log(`    🔐 Auth: http://localhost:${PORT}/api/auth/test`);
-    console.log(`    👥 Users: http://localhost:${PORT}/api/users`);
-    console.log(`    🎪 Events: http://localhost:${PORT}/api/events`);
-    console.log(`    🎟️ Invitados: http://localhost:${PORT}/api/invitados`); // Añadido 'Invitados'
+    console.log(`   💊 Health: http://localhost:${PORT}/health`);
+    console.log(`   🧪 Test: http://localhost:${PORT}/api/test`);
+    console.log(`   🔐 Auth: http://localhost:${PORT}/api/auth/test`);
+    console.log(`   👥 Users: http://localhost:${PORT}/api/users`);
+    console.log(`   🎪 Events: http://localhost:${PORT}/api/events`);
     console.log('\n✅ ¡Servidor completamente funcional!');
     
     // Conectar bases de datos en segundo plano
