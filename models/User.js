@@ -30,7 +30,8 @@ const userSchema = new mongoose.Schema({
     },
     // Campos adicionales para MongoDB
     avatar: {
-        type: Buffer
+        type: Buffer,
+        default: null
     },
     preferencias: {
         idioma: {

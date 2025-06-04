@@ -1,8 +1,13 @@
 const express = require('express');
 const router = express.Router();
+
+const multer   = require('multer');
+const storage  = multer.memoryStorage();           // o diskStorage
+const upload   = multer({ storage });
+
 const {
-    getProfile,
-    updateProfile,
+    getProfile,//
+    updateProfile,//
     changePassword,
     deleteAccount,
     getUserSessions,
@@ -25,7 +30,7 @@ const {
 
 // RUTAS DE PERFIL PERSONAL
 router.get('/profile', authenticateToken, getProfile);
-router.put('/profile', authenticateToken, updateProfile);
+router.put('/profile', authenticateToken, upload.single('avatar'),  updateProfile);
 router.post('/change-password', authenticateToken, changePassword);
 router.delete('/account', authenticateToken, deleteAccount);
 

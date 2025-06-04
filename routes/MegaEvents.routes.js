@@ -1,10 +1,12 @@
 const express = require('express');
 const router = express.Router();
-
+const { authenticateToken } = require('../middleware/auth'); // importa tu middleware
 // Importar controladores
 const {
-  createMegaEvent,
-  getAllMegaEvents,
+  getSqlMegaEvents,
+  getAllMegaEventsFull,
+  createMegaEvent,//
+  
   getMegaEventById,
   getOngMegaEvents,
   updateMegaEvent,
@@ -21,9 +23,11 @@ const {
   getMegaEventStatistics,
   getSystemStatistics,
   deleteMegaEventImage,
-  getAvailableCompanies,
+  getAvailableCompanies,//
   upload
 } = require('../controllers/MegaEvento.controller');
+
+router.get('/sql-all', getSqlMegaEvents);
 
 // RUTAS ESTÁTICAS PRIMERO
 router.get('/sistema/estadisticas', getSystemStatistics);
@@ -31,8 +35,9 @@ router.get('/empresas/disponibles', getAvailableCompanies);
 router.get('/filtros/proximos', getUpcomingMegaEvents);
 
 // RUTAS BÁSICAS
-router.post('/', upload.array('imagenesPromocionales', 10), createMegaEvent);
-router.get('/', getAllMegaEvents);
+
+router.post('/megaEvent',authenticateToken, upload.array('imagenesPromocionales', 10), createMegaEvent);
+
 
 // RUTAS CON PARÁMETROS - ESPECÍFICAS PRIMERO
 router.get('/buscar/:termino', searchMegaEvents);

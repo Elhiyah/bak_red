@@ -2,6 +2,9 @@ const { poolPromise } = require('../config/db');
 const Evento = require('../models/evento.model');
 const multer = require('multer');
 const sharp = require('sharp');
+// otras importaciones ...
+const User  = require('../models/user');   // ← ajusta la ruta según tu estructura
+
 
 // Estados válidos del evento
 const ESTADOS_EVENTO = {
@@ -28,7 +31,7 @@ const storage = multer.memoryStorage();
 const upload = multer({
   storage: storage,
   limits: {
-    fileSize: 5 * 1024 * 1024,
+    fileSize: 10 * 1024 * 1024,
     files: 5
   },
   fileFilter: (req, file, cb) => {
@@ -91,19 +94,8 @@ const validarONG = async (ongId) => {
 };
 
 // Obtener empresas disponibles
-const obtenerEmpresas = async () => {
-  const pool = await poolPromise;
-  const empresasResult = await pool.request()
-    .query(`
-      SELECT e.empresaID, e.nombre_empresa, u.correo, u.nombre_usuario
-      FROM empresas e
-      INNER JOIN usuarios u ON e.usuarioID = u.id_usuario
-      WHERE u.activo = 1 AND u.tipo_usuario = 'Empresa'
-      ORDER BY e.nombre_empresa
-    `);
-  
-  return empresasResult.recordset;
-};
+
+
 
 // Validar cambio de estado
 const validarCambioEstado = async (evento, nuevoEstado) => {
@@ -311,17 +303,17 @@ const createEvent = async (req, res) => {
       // Registrar patrocinadores
       for (const empresaId of patrocinadoresList) {
         await transaction.request()
-          .input('EventoID', sqlEventoId)
-          .input('EmpresaID', parseInt(empresaId))
-          .query(`INSERT INTO evento_patrocinadores (EventoID, EmpresaID) VALUES (@EventoID, @EmpresaID)`);
+          .input('evento_id', sqlEventoId)
+          .input('empresa_id', parseInt(empresaId))
+          .query(`INSERT INTO evento_patrocinadores (evento_id, empresa_id) VALUES (@evento_id, @empresa_id)`);
       }
 
       // Registrar auspiciadores
       for (const empresaId of auspiciadoresList) {
         await transaction.request()
-          .input('EventoID', sqlEventoId)
-          .input('EmpresaID', parseInt(empresaId))
-          .query(`INSERT INTO evento_Auspiciadores (EventoID, EmpresaID) VALUES (@EventoID, @EmpresaID)`);
+          .input('evento_id', sqlEventoId)
+          .input('empresa_id', parseInt(empresaId))
+          .query(`INSERT INTO evento_Auspisiadores (evento_id, empresa_id) VALUES (@evento_id, @empresa_id)`);
       }
 
       // Procesar imágenes
@@ -426,27 +418,26 @@ const getAllEvents = async (req, res) => {
 
     const total = await Evento.countDocuments(filtros);
 
-    // Obtener información de empresas
     const pool = await poolPromise;
     const eventosConEmpresas = await Promise.all(eventos.map(async (evento) => {
       const patrocinadores = await pool.request()
         .input('EventoID', evento.sqlEventoId)
         .query(`
-          SELECT e.empresaID, e.nombre_empresa, u.nombre_usuario
+          SELECT e.id_usuario, e.nombre_empresa, u.nombre_usuario
           FROM evento_patrocinadores ep
-          INNER JOIN empresas e ON ep.EmpresaID = e.empresaID
-          INNER JOIN usuarios u ON e.usuarioID = u.id_usuario
-          WHERE ep.EventoID = @EventoID
+          INNER JOIN empresas e ON ep.empresa_id = e.id_usuario
+          INNER JOIN usuarios u ON e.id_usuario = u.id_usuario
+          WHERE ep.evento_id = @EventoID
         `);
 
       const auspiciadores = await pool.request()
         .input('EventoID', evento.sqlEventoId)
         .query(`
-          SELECT e.empresaID, e.nombre_empresa, u.nombre_usuario
-          FROM evento_Auspiciadores ea
-          INNER JOIN empresas e ON ea.EmpresaID = e.empresaID
-          INNER JOIN usuarios u ON e.usuarioID = u.id_usuario
-          WHERE ea.EventoID = @EventoID
+          SELECT e.id_usuario, e.nombre_empresa, u.nombre_usuario
+          FROM evento_Auspisiadores ea
+          INNER JOIN empresas e ON ea.empresa_id = e.id_usuario
+          INNER JOIN usuarios u ON e.id_usuario = u.id_usuario
+          WHERE ea.evento_id = @EventoID
         `);
 
       if (evento.imagenesPromocionales && evento.imagenesPromocionales.length > 0) {
@@ -486,59 +477,106 @@ const getAllEvents = async (req, res) => {
 };
 
 // READ - Obtener evento por ID
+// READ - Obtener evento por ID (con imagen principal)
+// READ - Obtener evento por ID (y añadir imagenPrincipal en Base64)
+// controllers/eventos.js
 const getEventById = async (req, res) => {
   try {
     const { eventoId } = req.params;
-
-    const evento = await Evento.findById(eventoId);
-
+    
+    // 1) Trae el evento como objeto plano
+    const evento = await Evento.findById(eventoId).lean();
     if (!evento || !evento.activo) {
-      return res.status(404).json({
-        success: false,
-        error: 'Evento no encontrado'
-      });
+      return res.status(404).json({ success: false, error: 'Evento no encontrado' });
     }
 
-    // Obtener empresas participantes
+    /* ─────────────────────  IMÁGENES  ───────────────────── */
+
+    // a)  Convierto TODAS las imágenes a data-URL (solo cabecera + base64)
+    if (Array.isArray(evento.imagenesPromocionales) && evento.imagenesPromocionales.length) {
+      // imagen principal = primera de la lista
+      const primera = evento.imagenesPromocionales[0];
+      evento.imagenPrincipal = {
+        url: `data:${primera.mimeType};base64,${primera.datos.toString('base64')}`
+      };
+
+      // Galería: solo los campos necesarios + url
+      evento.imagenesPromocionales = evento.imagenesPromocionales.map(img => ({
+        _id:        img._id,
+        nombre:     img.nombre,
+        descripcion:img.descripcion,
+        tipo:       img.tipo,
+        url:        `data:${img.mimeType};base64,${img.datos.toString('base64')}`
+      }));
+    }
+
+    /* ─────────────────────  DEMÁS DATOS  ───────────────────── */
+    // 2) Consultas a SQL Server (igual que antes) …
     const pool = await poolPromise;
-    
-    const patrocinadores = await pool.request()
+
+    // Patrocinadores
+    const patrocinadoresResult = await pool.request()
       .input('EventoID', evento.sqlEventoId)
       .query(`
-        SELECT e.empresaID, e.nombre_empresa, u.nombre_usuario, u.correo
+        SELECT e.id_usuario AS empresaID, e.nombre_empresa, u.nombre_usuario, u.correo_electronico
         FROM evento_patrocinadores ep
-        INNER JOIN empresas e ON ep.EmpresaID = e.empresaID
-        INNER JOIN usuarios u ON e.usuarioID = u.id_usuario
-        WHERE ep.EventoID = @EventoID
+        INNER JOIN empresas e ON ep.empresa_id = e.id_usuario
+        INNER JOIN usuarios u ON e.id_usuario = u.id_usuario
+        WHERE ep.evento_id = @EventoID;
       `);
 
-    const auspiciadores = await pool.request()
+    // Auspiciadores
+    const auspiciadoresResult = await pool.request()
       .input('EventoID', evento.sqlEventoId)
       .query(`
-        SELECT e.empresaID, e.nombre_empresa, u.nombre_usuario, u.correo
-        FROM evento_Auspiciadores ea
-        INNER JOIN empresas e ON ea.EmpresaID = e.empresaID
-        INNER JOIN usuarios u ON e.usuarioID = u.id_usuario
-        WHERE ea.EventoID = @EventoID
+        SELECT e.id_usuario AS empresaID, e.nombre_empresa, u.nombre_usuario, u.correo_electronico
+        FROM evento_Auspisiadores ea
+        INNER JOIN empresas e ON ea.empresa_id = e.id_usuario
+        INNER JOIN usuarios u ON e.id_usuario = u.id_usuario
+        WHERE ea.evento_id = @EventoID;
       `);
 
-    const eventoCompleto = evento.toSafeObject();
-    eventoCompleto.empresasPatrocinadoras = patrocinadores.recordset;
-    eventoCompleto.empresasAuspiciadoras = auspiciadores.recordset;
+    evento.empresasPatrocinadoras = patrocinadoresResult.recordset;
+    evento.empresasAuspiciadoras  = auspiciadoresResult.recordset;
 
-    res.json({
-      success: true,
-      evento: eventoCompleto
-    });
+    /* ─── Mapear avatar Mongo para cada empresa ───────────────────────── */
+const idsPatro  = patrocinadoresResult.recordset.map(r => r.empresaID);
+const idsAuspi  = auspiciadoresResult.recordset .map(r => r.empresaID);
+const idsUnique = [...new Set([...idsPatro, ...idsAuspi])];
 
-  } catch (error) {
-    console.error('Error obteniendo evento:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Error al obtener evento'
-    });
+const mongoAvatars = await User
+  .find({ sqlUserId: { $in: idsUnique } })
+  .select('sqlUserId avatar')
+  .lean();
+
+const avatarMap = {};
+for (const u of mongoAvatars) {
+  if (u.avatar && u.avatar.length) {
+    // si siempre guardas jpeg, cámbialo aquí
+    const mime = 'image/jpeg';
+    avatarMap[u.sqlUserId] = `data:${mime};base64,${u.avatar.toString('base64')}`;
+  }
+}
+
+/* Añade avatar a cada registro                                             */
+evento.empresasPatrocinadoras = patrocinadoresResult.recordset.map(r => ({
+  ...r,
+  avatar: avatarMap[r.empresaID] || null
+}));
+
+evento.empresasAuspiciadoras = auspiciadoresResult.recordset.map(r => ({
+  ...r,
+  avatar: avatarMap[r.empresaID] || null
+}));
+
+
+    return res.json({ success: true, evento });
+  } catch (err) {
+    console.error('Error obteniendo evento:', err);
+    return res.status(500).json({ success: false, error: 'Error al obtener evento' });
   }
 };
+
 
 // READ - Obtener eventos de una ONG
 const getOngEvents = async (req, res) => {
@@ -714,7 +752,7 @@ const updateEvent = async (req, res) => {
 // DELETE - Eliminar evento
 const deleteEvent = async (req, res) => {
   try {
-    const { eventoId } = req.params;
+    const { eventoId } = req.params; 
     const { ongId } = req.body;
 
     const evento = await Evento.findById(eventoId);
@@ -1057,24 +1095,47 @@ const getEventStatistics = async (req, res) => {
 const getAvailableCompanies = async (req, res) => {
   try {
     const empresas = await obtenerEmpresas();
-    
     res.json({
       success: true,
       empresas: empresas.map(empresa => ({
-        id: empresa.empresaID,
-        nombre: empresa.nombre_empresa,
-        correo: empresa.correo,
+        id:           empresa.empresaID,
+        nombre:       empresa.nombre_empresa,
+        correo:       empresa.correo,
         nombreUsuario: empresa.nombre_usuario
       }))
     });
   } catch (error) {
-    console.error('Error obteniendo empresas:', error);
+    console.error('Error obteniendo empresas en getAvailableCompanies():', error);
     res.status(500).json({
       success: false,
       error: 'Error al obtener empresas'
     });
   }
 };
+
+async function obtenerEmpresas() {
+  try {
+    const pool = await poolPromise;
+    const result = await pool.request()
+      .query(`
+        SELECT 
+          e.id_usuario        AS empresaID,
+          e.nombre_empresa    AS nombre_empresa,
+          u.correo_electronico AS correo,
+          u.nombre_usuario    AS nombre_usuario
+        FROM empresas e
+        INNER JOIN usuarios u
+          ON e.id_usuario = u.id_usuario
+        WHERE u.activo = 1
+      `);
+    // recordset es un array de filas
+    return result.recordset;
+  } catch (err) {
+    console.error('Error en obtenerEmpresas():', err);
+    // Relanzamos para que el controlador capture el error
+    throw err;
+  }
+}
 
 // Buscar eventos por texto
 const searchEvents = async (req, res) => {
@@ -1588,12 +1649,18 @@ const getUserParticipationEvents = async (req, res) => {
     const { integranteId } = req.params;
     const { estado, conAsistencia, limite = 10 } = req.query;
 
+    // 1) Construir consulta a SQL Server sólo con las columnas existentes
     const pool = await poolPromise;
     let query = `
-      SELECT e.EventoID, e.Tittulo, e.F_Inicio, e.Locacion, 
-             eie.asistencia, eie.tipo_participante, eie.fecha_registro
+      SELECT 
+        e.EventoID, 
+        e.Tittulo, 
+        e.F_Inicio, 
+        e.Locacion, 
+        eie.asistencia
       FROM evento_integrantes_externos eie
-      INNER JOIN Eventos e ON eie.evento_id = e.EventoID
+      INNER JOIN Eventos e 
+        ON eie.evento_id = e.EventoID
       WHERE eie.integrante_externo_id = @integranteId
     `;
 
@@ -1605,16 +1672,31 @@ const getUserParticipationEvents = async (req, res) => {
 
     query += ' ORDER BY e.F_Inicio DESC';
 
+    // 2) Ejecutar la consulta en SQL Server
     const result = await pool.request()
       .input('integranteId', integranteId)
       .query(query);
 
-    const sqlEventoIds = result.recordset.map(e => e.EventoID);
-    let filtrosMongo = { 
+    const sqlRecordset = result.recordset; // array de filas con { EventoID, Tittulo, F_Inicio, Locacion, asistencia }
+
+    // 3) Extraer los sqlEventoIds para filtrar en Mongo
+    const sqlEventoIds = sqlRecordset.map(r => r.EventoID);
+    if (sqlEventoIds.length === 0) {
+      // Si no hay participaciones, devolvemos un array vacío
+      return res.json({
+        success: true,
+        integranteId: parseInt(integranteId),
+        eventos: [],
+        total: 0,
+        filtros: { estado, conAsistencia }
+      });
+    }
+
+    // 4) Consultar Mongo (colección de eventos) sólo con los sqlEventoIds recuperados
+    const filtrosMongo = { 
       sqlEventoId: { $in: sqlEventoIds },
       activo: true 
     };
-    
     if (estado) {
       filtrosMongo.estado = estado;
     }
@@ -1623,27 +1705,28 @@ const getUserParticipationEvents = async (req, res) => {
       .limit(parseInt(limite))
       .lean();
 
+    // 5) Combinar datos de Mongo con la asistencia traída de SQL
     const eventosCombinados = eventosCompletos.map(eventoMongo => {
-      const eventoSQL = result.recordset.find(e => e.EventoID === eventoMongo.sqlEventoId);
-      
-      if (eventoMongo.imagenesPromocionales && eventoMongo.imagenesPromocionales.length > 0) {
+      const filaSQL = sqlRecordset.find(r => r.EventoID === eventoMongo.sqlEventoId);
+
+      // Armar imagen principal si existen imágenesPromocionales en Mongo
+      if (eventoMongo.imagenesPromocionales?.length > 0) {
         eventoMongo.imagenPrincipal = {
           url: `data:${eventoMongo.imagenesPromocionales[0].mimeType};base64,${eventoMongo.imagenesPromocionales[0].datos.toString('base64')}`
         };
       }
       delete eventoMongo.imagenesPromocionales;
-      
+
       return {
         ...eventoMongo,
         participacion: {
-          asistencia: eventoSQL.asistencia,
-          tipoParticipante: eventoSQL.tipo_participante,
-          fechaRegistro: eventoSQL.fecha_registro
+          asistencia: filaSQL.asistencia
+          // ya no devolvemos tipoParticipante ni fechaRegistro, porque no existen en SQL
         }
       };
     });
 
-    res.json({
+    return res.json({
       success: true,
       integranteId: parseInt(integranteId),
       eventos: eventosCombinados,
@@ -1653,7 +1736,7 @@ const getUserParticipationEvents = async (req, res) => {
 
   } catch (error) {
     console.error('Error obteniendo eventos del integrante:', error);
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
       error: 'Error al obtener eventos del integrante'
     });
@@ -1872,6 +1955,144 @@ const getOngStatusDashboard = async (req, res) => {
     });
   }
 };
+const registrarPatrocinador = async (req, res) => {
+  // 1) Extraer IDs
+  const eventoId = parseInt(req.params.id, 10);
+  const empresaId = parseInt(req.body.empresa_id, 10);
+
+  // 2) Validar que existan
+  if (!eventoId || !empresaId) {
+    return res.status(400).json({ success: false, error: 'Faltan datos: eventoId o empresaId' });
+  }
+
+  try {
+    const pool = await poolPromise;
+
+    // 3) Verificar que el evento existe
+    const eventoCheck = await pool.request()
+      .input('eventoId', sql.Int, eventoId)
+      .query(`
+        SELECT 1 
+        FROM Eventos 
+        WHERE EventoID = @eventoId;
+      `);
+    if (eventoCheck.recordset.length === 0) {
+      return res.status(404).json({ success: false, error: 'El evento no existe' });
+    }
+
+    // 4) Verificar que la empresa existe
+    const empresaCheck = await pool.request()
+      .input('empresaId', sql.Int, empresaId)
+      .query(`
+        SELECT 1 
+        FROM empresas 
+        WHERE id_usuario = @empresaId;
+      `);
+    if (empresaCheck.recordset.length === 0) {
+      return res.status(404).json({ success: false, error: 'La empresa no existe' });
+    }
+
+    // 5) Verificar si ya está registrada como patrocinador
+    const check = await pool.request()
+      .input('eventoId', sql.Int, eventoId)
+      .input('empresaId', sql.Int, empresaId)
+      .query(`
+        SELECT 1 
+        FROM evento_patrocinadores 
+        WHERE evento_id = @eventoId 
+          AND empresa_id = @empresaId;
+      `);
+
+    if (check.recordset.length > 0) {
+      return res.status(409).json({ success: false, error: 'Ya está registrada como patrocinador' });
+    }
+
+    // 6) Insertar en evento_patrocinadores
+    await pool.request()
+      .input('eventoId', sql.Int, eventoId)
+      .input('empresaId', sql.Int, empresaId)
+      .query(`
+        INSERT INTO evento_patrocinadores (evento_id, empresa_id) 
+        VALUES (@eventoId, @empresaId);
+      `);
+
+    return res.json({ success: true, message: 'Empresa registrada como patrocinador' });
+
+  } catch (err) {
+    console.error('Error en registrarPatrocinador:', err);
+    return res.status(500).json({ success: false, error: 'Error interno de servidor' });
+  }
+};
+
+// → Registra un auspiciador en un evento
+const registrarAuspiciador = async (req, res) => {
+  const eventoId = parseInt(req.params.id, 10);
+  const empresaId = parseInt(req.body.empresa_id, 10);
+
+  if (!eventoId || !empresaId) {
+    return res.status(400).json({ success: false, error: 'Faltan datos: eventoId o empresaId' });
+  }
+
+  try {
+    const pool = await poolPromise;
+
+    // Verificar que el evento existe
+    const eventoCheck = await pool.request()
+      .input('eventoId', sql.Int, eventoId)
+      .query(`
+        SELECT 1 
+        FROM Eventos 
+        WHERE EventoID = @eventoId;
+      `);
+    if (eventoCheck.recordset.length === 0) {
+      return res.status(404).json({ success: false, error: 'El evento no existe' });
+    }
+
+    // Verificar que la empresa existe
+    const empresaCheck = await pool.request()
+      .input('empresaId', sql.Int, empresaId)
+      .query(`
+        SELECT 1 
+        FROM empresas 
+        WHERE id_usuario = @empresaId;
+      `);
+    if (empresaCheck.recordset.length === 0) {
+      return res.status(404).json({ success: false, error: 'La empresa no existe' });
+    }
+
+    // Verificar si ya está registrada como auspiciador
+    const check = await pool.request()
+      .input('eventoId', sql.Int, eventoId)
+      .input('empresaId', sql.Int, empresaId)
+      .query(`
+        SELECT 1 
+        FROM evento_Auspisiadores 
+        WHERE evento_id = @eventoId 
+          AND empresa_id = @empresaId;
+      `);
+
+    if (check.recordset.length > 0) {
+      return res.status(409).json({ success: false, error: 'Ya está registrada como auspiciador' });
+    }
+
+    // Insertar en evento_Auspisiadores
+    await pool.request()
+      .input('eventoId', sql.Int, eventoId)
+      .input('empresaId', sql.Int, empresaId)
+      .query(`
+        INSERT INTO evento_Auspisiadores (evento_id, empresa_id) 
+        VALUES (@eventoId, @empresaId);
+      `);
+
+    return res.json({ success: true, message: 'Empresa registrada como auspiciador' });
+
+  } catch (err) {
+    console.error('Error en registrarAuspiciador:', err);
+    return res.status(500).json({ success: false, error: 'Error interno de servidor' });
+  }
+};
+
+
 
 // ================ EXPORTS ================
 
@@ -1915,6 +2136,9 @@ module.exports = {
   // Consultas específicas
   getCompanyEvents,
   getUserParticipationEvents,
+
+  registrarPatrocinador,
+  registrarAuspiciador,
   
   // Configuración
   upload,

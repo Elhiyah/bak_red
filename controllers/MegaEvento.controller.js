@@ -2,6 +2,7 @@ const { poolPromise } = require('../config/db');
 const MegaEvento = require('../models/megaEvento.model');
 const multer = require('multer');
 const sharp = require('sharp');
+const User            = require('../models/user');   
 
 // Estados válidos del mega evento
 const ESTADOS_MEGA_EVENTO = {
@@ -227,7 +228,7 @@ const createMegaEvent = async (req, res) => {
       fechaFin,
       ubicacion,
       categoria,
-      ongOrganizadoraPrincipal,
+      ongOrganizadoraPrincipal, // esta viene como string o número de la petición
       capacidadMaxima,
       requiereAprobacion,
       patrocinadores,
@@ -236,26 +237,9 @@ const createMegaEvent = async (req, res) => {
       estado = ESTADOS_MEGA_EVENTO.PLANIFICACION
     } = req.body;
 
-    console.log('📝 Creando mega evento:', { titulo, ongOrganizadoraPrincipal, estado });
+    // …validaciones básicas…
 
-    // Validaciones básicas
-    if (!titulo || !fechaInicio || !fechaFin || !ongOrganizadoraPrincipal || !ubicacion) {
-      return res.status(400).json({ 
-        success: false,
-        error: 'Faltan campos requeridos: titulo, fechaInicio, fechaFin, ongOrganizadoraPrincipal, ubicacion' 
-      });
-    }
-
-    // Validar estado
-    if (!Object.values(ESTADOS_MEGA_EVENTO).includes(estado)) {
-      return res.status(400).json({
-        success: false,
-        error: 'Estado no válido',
-        estadosValidos: Object.values(ESTADOS_MEGA_EVENTO)
-      });
-    }
-
-    // Validar ONG organizadora principal
+    // 1) Validar ONG organizadora principal en SQL (ya lo hacías)
     const esONG = await validarONG(ongOrganizadoraPrincipal);
     if (!esONG) {
       return res.status(403).json({ 
@@ -264,10 +248,17 @@ const createMegaEvent = async (req, res) => {
       });
     }
 
-    // Validar fechas
+    // 2) Obtener usuario Mongo para extraer sqlUserId (número)
+    //    (authenticateToken ya puso req.user.userId = ObjectId Mongo)
+    const mongoUser = await User.findById(req.user.userId).select('sqlUserId');
+    if (!mongoUser) {
+      return res.status(404).json({ success: false, error: 'Usuario no encontrado' });
+    }
+    const creadorSqlId = mongoUser.sqlUserId; // ==> número
+
+    // 3) Validar fechas y transformar
     const fechaInicioDate = new Date(fechaInicio);
-    const fechaFinDate = new Date(fechaFin);
-    
+    const fechaFinDate   = new Date(fechaFin);
     if (fechaFinDate <= fechaInicioDate) {
       return res.status(400).json({
         success: false,
@@ -275,245 +266,234 @@ const createMegaEvent = async (req, res) => {
       });
     }
 
-    // Procesar patrocinadores
+    // 4) Procesar lista de patrocinadores si viene
     let patrocinadoresList = [];
     if (patrocinadores) {
-      patrocinadoresList = Array.isArray(patrocinadores) ? 
-        patrocinadores : JSON.parse(patrocinadores || '[]');
+      patrocinadoresList = Array.isArray(patrocinadores)
+        ? patrocinadores
+        : JSON.parse(patrocinadores);
     }
 
-    // Transacción SQL Server
+    // 5) Iniciar transacción en SQL Server
     const pool = await poolPromise;
     const transaction = pool.transaction();
     await transaction.begin();
 
     try {
-      // Crear mega evento en SQL Server
+      // 6) Insertar en mega_eventos (SQL)
       const sqlResult = await transaction.request()
-        .input('titulo', titulo)
-        .input('descripcion', descripcion || null)
-        .input('fecha_inicio', fechaInicioDate)
-        .input('fecha_fin', fechaFinDate)
-        .input('ubicacion', typeof ubicacion === 'string' ? ubicacion : ubicacion.direccion)
+        .input('titulo',        titulo)
+        .input('descripcion',   descripcion || null)
+        .input('fecha_inicio',  fechaInicioDate)
+        .input('fecha_fin',     fechaFinDate)
+        .input('ubicacion',     ubicacion)
         .input('fecha_creacion', new Date())
         .input('fecha_actualizacion', new Date())
         .query(`
-          INSERT INTO mega_eventos (titulo, descripcion, fecha_inicio, fecha_fin, ubicacion, fecha_creacion, fecha_actualizacion)
+          INSERT INTO mega_eventos
+            (titulo, descripcion, fecha_inicio, fecha_fin, ubicacion, fecha_creacion, fecha_actualizacion)
           OUTPUT INSERTED.MegaEventoID
           VALUES (@titulo, @descripcion, @fecha_inicio, @fecha_fin, @ubicacion, @fecha_creacion, @fecha_actualizacion)
         `);
 
       const sqlMegaEventoId = sqlResult.recordset[0].MegaEventoID;
 
-      // Registrar ONG organizadora principal
+      // 7) Registrar ONG organizadora principal en SQL
       await transaction.request()
         .input('mega_evento_id', sqlMegaEventoId)
-        .input('ong_id', parseInt(ongOrganizadoraPrincipal))
-        .input('rol_organizacion', 'coordinador_principal')
-        .input('fecha_union', new Date())
-        .input('activo', true)
+        .input('ong_id',         parseInt(ongOrganizadoraPrincipal, 10))
+        .input('rol_organizacion','coordinador_principal')
+        .input('fecha_union',     new Date())
+        .input('activo',          true)
         .query(`
           INSERT INTO mega_evento_ongs_organizadoras 
-          (mega_evento_id, ong_id, rol_organizacion, fecha_union, activo)
+            (mega_evento_id, ong_id, rol_organizacion, fecha_union, activo)
           VALUES (@mega_evento_id, @ong_id, @rol_organizacion, @fecha_union, @activo)
         `);
 
-      // Registrar patrocinadores
+      // 8) Registrar patrocinadores en SQL
       for (const patrocinador of patrocinadoresList) {
         await transaction.request()
-          .input('mega_evento_id', sqlMegaEventoId)
-          .input('empresa_id', parseInt(patrocinador.empresaId))
-          .input('tipo_patrocinio', patrocinador.tipoPatrocinio || 'colaborador')
-          .input('monto_contribucion', patrocinador.montoContribucion || null)
+          .input('mega_evento_id',       sqlMegaEventoId)
+          .input('empresa_id',           parseInt(patrocinador.empresaId, 10))
+          .input('tipo_patrocinio',      patrocinador.tipoPatrocinio || 'colaborador')
+          .input('monto_contribucion',   patrocinador.montoContribucion || null)
           .input('descripcion_contribucion', patrocinador.descripcionContribucion || null)
-          .input('fecha_compromiso', new Date())
-          .input('estado_compromiso', 'comprometido')
+          .input('fecha_compromiso',      new Date())
+          .input('estado_compromiso',     'comprometido')
           .query(`
             INSERT INTO mega_evento_patrocinadores 
-            (mega_evento_id, empresa_id, tipo_patrocinio, monto_contribucion, descripcion_contribucion, fecha_compromiso, estado_compromiso)
+              (mega_evento_id, empresa_id, tipo_patrocinio, monto_contribucion, descripcion_contribucion, fecha_compromiso, estado_compromiso)
             VALUES (@mega_evento_id, @empresa_id, @tipo_patrocinio, @monto_contribucion, @descripcion_contribucion, @fecha_compromiso, @estado_compromiso)
           `);
       }
 
-      // Procesar imágenes
+      // 9) Procesar imágenes (si las enviaste)
       let imagenesPromocionales = [];
       if (req.files && req.files.length > 0) {
         imagenesPromocionales = await processImages(req.files);
       }
 
-      // Crear en MongoDB
+      // 10) Armar el documento Mongo para MegaEvento
       const megaEventoData = {
         sqlMegaEventoId,
         titulo,
         descripcion: descripcion || '',
-        fechaInicio: fechaInicioDate,
-        fechaFin: fechaFinDate,
-        ubicacion: typeof ubicacion === 'string' 
-          ? { direccion: ubicacion, ciudad: 'Santa Cruz', tipoLocacion: 'presencial' }
-          : ubicacion,
-        categoria: categoria || 'social',
+        fechaInicio:   fechaInicioDate,
+        fechaFin:      fechaFinDate,
+        ubicacion:     { direccion: ubicacion, ciudad: 'Sin ciudad', tipoLocacion: 'presencial' },
+        categoria:     categoria || 'social',
+        createdAt:     new Date(),
+        actualizadoAt: new Date(),
+        // → AQUÍ: usar el sqlUserId numérico como creadoPor
+        creadoPor:     creadorSqlId,
+        // la ONG organizadora principal también es número
+        ongOrganizadoraPrincipal: parseInt(ongOrganizadoraPrincipal, 10),
         ongsOrganizadoras: [{
-          ongId: parseInt(ongOrganizadoraPrincipal),
+          ongId:           parseInt(ongOrganizadoraPrincipal, 10),
           rolOrganizacion: 'coordinador_principal',
-          fechaUnion: new Date(),
-          activo: true
+          fechaUnion:      new Date(),
+          activo:          true
         }],
         patrocinadores: patrocinadoresList.map(p => ({
-          empresaId: parseInt(p.empresaId),
-          tipoPatrocinio: p.tipoPatrocinio || 'colaborador',
-          montoContribucion: p.montoContribucion,
+          empresaId:            parseInt(p.empresaId, 10),
+          tipoPatrocinio:       p.tipoPatrocinio || 'colaborador',
+          montoContribucion:    p.montoContribucion,
           descripcionContribucion: p.descripcionContribucion,
-          fechaCompromiso: new Date(),
-          estadoCompromiso: 'comprometido'
+          fechaCompromiso:      new Date(),
+          estadoCompromiso:     'comprometido'
         })),
-        capacidadMaxima: capacidadMaxima ? parseInt(capacidadMaxima) : null,
-        requiereAprobacion: requiereAprobacion === true,
+        capacidadMaxima:     capacidadMaxima ? parseInt(capacidadMaxima, 10) : null,
+        requiereAprobacion:  !!requiereAprobacion,
         imagenesPromocionales,
         estado,
-        esPublico: estado === ESTADOS_MEGA_EVENTO.CONVOCATORIA,
-        inscripcionAbierta: estado === ESTADOS_MEGA_EVENTO.CONVOCATORIA,
-        activo: true,
-        tags: Array.isArray(tags) ? tags : (tags ? tags.split(',').map(t => t.trim()) : []),
-        prioridad: prioridad || 'media',
+        esPublico:           false, // puedes ajustar según estado
+        inscripcionAbierta:  false,
+        activo:              true,
+        tags:                Array.isArray(tags) ? tags : (tags ? tags.split(',').map(t => t.trim()) : []),
+        prioridad:           prioridad || 'media',
         metricas: {
-          totalInscritos: 0,
-          totalAsistentes: 0,
+          totalInscritos:       0,
+          totalAsistentes:      0,
           totalOngsParticipantes: 1,
-          totalPatrocinadores: patrocinadoresList.length,
+          totalPatrocinadores:  patrocinadoresList.length,
           porcentajeAsistencia: 0
         },
         participantesExternos: [],
         historialEstados: [{
-          estadoAnterior: null,
-          estadoNuevo: estado,
-          fecha: new Date(),
-          motivo: 'Creación del mega evento',
-          usuarioId: parseInt(ongOrganizadoraPrincipal)
+          estadoAnterior:   null,
+          estadoNuevo:      estado,
+          fecha:            new Date(),
+          motivo:           'Creación del mega evento',
+          usuarioId:        creadorSqlId
         }]
       };
 
+      // 11) Guardar en Mongo
       const nuevoMegaEvento = new MegaEvento(megaEventoData);
       await nuevoMegaEvento.save();
 
+      // 12) Commit de la transacción SQL Server
       await transaction.commit();
 
-      res.status(201).json({
+      return res.status(201).json({
         success: true,
         message: 'Mega evento creado exitosamente',
         megaEvento: {
           id: nuevoMegaEvento._id,
           sqlMegaEventoId,
           titulo: nuevoMegaEvento.titulo,
-          estado: nuevoMegaEvento.estado,
-          fechaInicio: nuevoMegaEvento.fechaInicio,
-          fechaFin: nuevoMegaEvento.fechaFin,
-          totalImagenes: nuevoMegaEvento.imagenesPromocionales.length,
-          totalPatrocinadores: patrocinadoresList.length,
-          totalOngsOrganizadoras: 1
+          estado: nuevoMegaEvento.estado
         }
       });
-
-    } catch (error) {
+    } catch (err) {
+      // Si algo falla en SQL, rollback
       await transaction.rollback();
-      throw error;
+      throw err;
     }
-
   } catch (error) {
     console.error('💥 Error creando mega evento:', error);
     res.status(500).json({
       success: false,
-      error: 'Error interno del servidor al crear mega evento'
+      error: 'Error interno al crear mega evento'
     });
   }
 };
+
 
 // READ - Obtener todos los mega eventos
-const getAllMegaEvents = async (req, res) => {
+const getAllMegaEventsFull = async (req, res) => {
   try {
-    const { categoria, ciudad, estado = 'convocatoria', pagina = 1, limite = 10 } = req.query;
+    // 1) Primero, obtengo TODOS los mega_eventos desde SQL Server
+    const pool = await poolPromise;
+    const sqlResult = await pool.request().query(`
+      SELECT
+        MegaEventoID,
+        titulo,
+        descripcion,
+        fecha_inicio    AS fechaInicio,
+        fecha_fin       AS fechaFin,
+        ubicacion,
+        presupuesto_estimado AS presupuestoEstimado,
+        fecha_creacion  AS fechaCreacion,
+        fecha_actualizacion AS fechaActualizacion,
+        activo
+      FROM mega_eventos
+    `);
 
-    const filtros = { 
-      estado, 
-      esPublico: true, 
-      activo: true,
-      fechaInicio: { $gte: new Date() }
-    };
-    
-    if (categoria) filtros.categoria = categoria;
-    if (ciudad) filtros['ubicacion.ciudad'] = ciudad;
+    const sqlRows = sqlResult.recordset; // array de registros SQL
 
-    const skip = (parseInt(pagina) - 1) * parseInt(limite);
-
-    const megaEventos = await MegaEvento.find(filtros)
-      .sort({ fechaInicio: 1 })
-      .skip(skip)
-      .limit(parseInt(limite))
+    // 2) Luego, consulto en MongoDB todos los documentos en la colección "MegaEvento"
+    //    que tengan sqlMegaEventoId igual a alguno de los IDs que sacamos de SQL.
+    const todosIdsSQL = sqlRows.map(r => r.MegaEventoID);
+    const mongoDocs = await MegaEvento
+      .find({ sqlMegaEventoId: { $in: todosIdsSQL } })
       .lean();
 
-    const total = await MegaEvento.countDocuments(filtros);
-
-    // Obtener información adicional de SQL Server
-    const pool = await poolPromise;
-    const megaEventosCompletos = await Promise.all(megaEventos.map(async (megaEvento) => {
-      // Obtener ONGs organizadoras
-      const ongsOrganizadoras = await pool.request()
-        .input('MegaEventoID', megaEvento.sqlMegaEventoId)
-        .query(`
-          SELECT o.id_usuario, o.nombre_ong, u.nombre_usuario, meoo.rol_organizacion
-          FROM mega_evento_ongs_organizadoras meoo
-          INNER JOIN ongs o ON meoo.ong_id = o.id_usuario
-          INNER JOIN usuarios u ON o.id_usuario = u.id_usuario
-          WHERE meoo.mega_evento_id = @MegaEventoID AND meoo.activo = 1
-        `);
-
-      // Obtener patrocinadores
-      const patrocinadores = await pool.request()
-        .input('MegaEventoID', megaEvento.sqlMegaEventoId)
-        .query(`
-          SELECT e.empresaID, e.nombre_empresa, u.nombre_usuario, 
-                 mep.tipo_patrocinio, mep.estado_compromiso
-          FROM mega_evento_patrocinadores mep
-          INNER JOIN empresas e ON mep.empresa_id = e.empresaID
-          INNER JOIN usuarios u ON e.usuarioID = u.id_usuario
-          WHERE mep.mega_evento_id = @MegaEventoID
-        `);
-
-      if (megaEvento.imagenesPromocionales && megaEvento.imagenesPromocionales.length > 0) {
-        const imagenPrincipal = megaEvento.imagenesPromocionales[0];
-        megaEvento.imagenPrincipal = {
-          url: `data:${imagenPrincipal.mimeType};base64,${imagenPrincipal.datos.toString('base64')}`
-        };
-      }
-      
-      delete megaEvento.imagenesPromocionales;
-
-      return {
-        ...megaEvento,
-        ongsOrganizadoras: ongsOrganizadoras.recordset,
-        patrocinadoresDetalle: patrocinadores.recordset
-      };
-    }));
-
-    res.json({
-      success: true,
-      megaEventos: megaEventosCompletos,
-      paginacion: {
-        pagina: parseInt(pagina),
-        limite: parseInt(limite),
-        total,
-        totalPaginas: Math.ceil(total / parseInt(limite))
-      }
+    // 3) Indexo los documentos de Mongo por sqlMegaEventoId para acceder rápido
+    const mapaMongo = {};
+    mongoDocs.forEach(doc => {
+      mapaMongo[doc.sqlMegaEventoId] = doc;
     });
 
+    // 4) Construyo el array combinado: por cada fila SQL, agrego su contraparte de Mongo (si existe).
+    const combinados = sqlRows.map(sqlRow => {
+      const mongoDoc = mapaMongo[sqlRow.MegaEventoID] || null;
+      return {
+        sql: {
+          MegaEventoID:         sqlRow.MegaEventoID,
+          titulo:               sqlRow.titulo,
+          descripcion:          sqlRow.descripcion,
+          fechaInicio:          sqlRow.fechaInicio,
+          fechaFin:             sqlRow.fechaFin,
+          ubicacion:            sqlRow.ubicacion,
+          presupuestoEstimado:  sqlRow.presupuestoEstimado,
+          fechaCreacion:        sqlRow.fechaCreacion,
+          fechaActualizacion:   sqlRow.fechaActualizacion,
+          activo:               sqlRow.activo
+        },
+        mongo: mongoDoc // o null si no existe
+      };
+    });
+
+    return res.json({
+      success: true,
+      total: combinados.length,
+      megaEventos: combinados
+    });
   } catch (error) {
-    console.error('Error obteniendo mega eventos:', error);
-    res.status(500).json({
+    console.error('Error en getAllMegaEventsFull:', error);
+    return res.status(500).json({
       success: false,
-      error: 'Error al obtener mega eventos'
+      error: 'Error al obtener todos los mega‐eventos'
     });
   }
 };
 
+module.exports = {
+  // … otros controladores …
+  getAllMegaEventsFull
+};
 // READ - Obtener mega evento por ID
 const getMegaEventById = async (req, res) => {
   try {
@@ -1654,10 +1634,44 @@ const getAvailableCompanies = async (req, res) => {
 
 // ================ EXPORTS ================
 
+const getSqlMegaEvents = async (req, res) => {
+  try {
+    const pool = await poolPromise;
+    const result = await pool.request().query(`
+      SELECT 
+        MegaEventoID,
+        titulo,
+        descripcion,
+        fecha_inicio    AS fechaInicio,
+        fecha_fin       AS fechaFin,
+        ubicacion,
+        presupuesto_estimado AS presupuesto,
+        fecha_creacion  AS fechaCreacion,
+        fecha_actualizacion AS fechaActualizacion,
+        activo
+      FROM [UNI2].[dbo].[mega_eventos]
+      WHERE activo = 1
+      ORDER BY fecha_inicio ASC
+    `);
+
+    return res.json({
+      success: true,
+      megaEventos: result.recordset
+    });
+  } catch (error) {
+    console.error('Error obteniendo MegaEventos SQL:', error);
+    return res.status(500).json({
+      success: false,
+      error: 'Error al obtener MegaEventos desde SQL Server'
+    });
+  }
+};
+
 module.exports = {
   // CRUD básico
+  getSqlMegaEvents,
+  getAllMegaEventsFull,
   createMegaEvent,
-  getAllMegaEvents,
   getMegaEventById,
   getOngMegaEvents,
   updateMegaEvent,

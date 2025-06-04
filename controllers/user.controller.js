@@ -3,133 +3,244 @@ const User = require('../models/user');
 const bcrypt = require('bcryptjs');
 
 // Obtener perfil completo del usuario
+// routes/users.routes.js  ➜  GET /api/users/profile
 const getProfile = async (req, res) => {
-    try {
-        const mongoUser = await User.findById(req.user.userId).select('-contrasena -sesiones');
-        
-        if (!mongoUser) {
-            return res.status(404).json({
-                success: false,
-                error: "Usuario no encontrado"
-            });
-        }
-
-        // Obtener datos adicionales de SQL Server según el tipo de usuario
-        const pool = await poolPromise;
-        let sqlData = {};
-
-        const baseQuery = await pool.request()
-            .input('id_usuario', mongoUser.sqlUserId)
-            .query('SELECT * FROM usuarios WHERE id_usuario = @id_usuario');
-
-        const baseUser = baseQuery.recordset[0];
-
-        // Obtener datos específicos según el tipo de usuario
-        switch (mongoUser.tipo_usuario) {
-            case 'Empresa':
-                const empresaQuery = await pool.request()
-                    .input('id_usuario', mongoUser.sqlUserId)
-                    .query('SELECT * FROM empresas WHERE id_usuario = @id_usuario');
-                sqlData = { ...baseUser, empresa: empresaQuery.recordset[0] };
-                break;
-                
-            case 'ONG':
-                const ongQuery = await pool.request()
-                    .input('id_usuario', mongoUser.sqlUserId)
-                    .query('SELECT * FROM ONGS WHERE id_usuario = @id_usuario');
-                sqlData = { ...baseUser, ong: ongQuery.recordset[0] };
-                break;
-                
-            case 'Integrante externo':
-                const integranteQuery = await pool.request()
-                    .input('id_usuario', mongoUser.sqlUserId)
-                    .query('SELECT * FROM integrantes_externos WHERE id_usuario = @id_usuario');
-                sqlData = { ...baseUser, integrante: integranteQuery.recordset[0] };
-                break;
-                
-            case 'Super admin':
-                const adminQuery = await pool.request()
-                    .input('id_usuario', mongoUser.sqlUserId)
-                    .query('SELECT * FROM super_admins WHERE id_usuario = @id_usuario');
-                sqlData = { ...baseUser, admin: adminQuery.recordset[0] };
-                break;
-                
-            default:
-                sqlData = baseUser;
-        }
-
-        // Remover contraseña de los datos SQL
-        delete sqlData.contrasena;
-
-        res.json({
-            success: true,
-            user: {
-                ...mongoUser.toObject(),
-                sqlData
-            }
-        });
-    } catch (error) {
-        console.error('Error al obtener perfil:', error);
-        res.status(500).json({
-            success: false,
-            error: "Error interno del servidor"
-        });
+  try {
+    const mongoUser = await User.findById(req.user.userId);   // ⟵ obtenemos avatar (Buffer)
+    if (!mongoUser) {
+      return res.status(404).json({ success:false, error:'Usuario no encontrado' });
     }
+
+    /* ─── 1) Codificar avatar si existe ─── */
+    let avatarDataUrl = null;
+    if (mongoUser.avatar && mongoUser.avatar.length) {
+      // Opcional: si quieres detectar mimeType en otro campo, cámbialo aquí
+      const mime = 'image/jpeg';
+      avatarDataUrl = `data:${mime};base64,${mongoUser.avatar.toString('base64')}`;
+    }
+
+    /* ─── 2) SQL extra, igual que antes ─── */
+    const pool = await poolPromise;
+    let sqlData = {};
+    const baseUser = (
+      await pool.request()
+        .input('id_usuario', mongoUser.sqlUserId)
+        .query('SELECT * FROM usuarios WHERE id_usuario = @id_usuario')
+    ).recordset[0];
+
+    switch (mongoUser.tipo_usuario) {
+      case 'Empresa':
+        sqlData = {
+          ...baseUser,
+          empresa: (await pool.request()
+                     .input('id_usuario', mongoUser.sqlUserId)
+                     .query('SELECT * FROM empresas WHERE id_usuario = @id_usuario')
+                   ).recordset[0]
+        };
+        break;
+      case 'ONG':
+        sqlData = {
+          ...baseUser,
+          ong: (await pool.request()
+                   .input('id_usuario', mongoUser.sqlUserId)
+                   .query('SELECT * FROM ongs WHERE id_usuario = @id_usuario')
+                 ).recordset[0]
+        };
+        break;
+      case 'Integrante externo':
+        sqlData = {
+          ...baseUser,
+          integrante: (await pool.request()
+                          .input('id_usuario', mongoUser.sqlUserId)
+                          .query('SELECT * FROM integrantes_externos WHERE id_usuario = @id_usuario')
+                        ).recordset[0]
+        };
+        break;
+      case 'Super admin':
+        sqlData = {
+          ...baseUser,
+          admin: (await pool.request()
+                     .input('id_usuario', mongoUser.sqlUserId)
+                     .query('SELECT * FROM super_admins WHERE id_usuario = @id_usuario')
+                   ).recordset[0]
+        };
+        break;
+      default:
+        sqlData = baseUser;
+    }
+
+    delete sqlData.contrasena;   // nunca enviar password hash
+
+    return res.json({
+      success: true,
+      user: {
+        ...mongoUser.toSafeObject(), // ya excluye contrasena
+        avatar: avatarDataUrl,       // ⟵ NUEVO, string ó null
+        sqlData
+      }
+    });
+  } catch (err) {
+    console.error('Error al obtener perfil:', err);
+    res.status(500).json({ success:false, error:'Error interno del servidor' });
+  }
 };
 
 // Actualizar perfil del usuario
+// controllers/user.controller.js
+// controllers/user.controller.js
+
+// controllers/user.controller.js
+
+// controllers/user.controller.js
+
 const updateProfile = async (req, res) => {
-    try {
-        const { avatar, preferencias, ...sqlFields } = req.body;
-        
-        // Actualizar datos en MongoDB
-        const updateData = {};
-        if (avatar) updateData.avatar = avatar;
-        if (preferencias) updateData.preferencias = { ...preferencias };
+  try {
+    // 1) Asegurar que body exista
+    const body = req.body || {};
 
-        const mongoUser = await User.findByIdAndUpdate(
-            req.user.userId,
-            updateData,
-            { new: true, runValidators: true }
-        ).select('-contrasena -sesiones');
+    // 2) Construir updateData para Mongo
+    const updateData = {};
 
-        // Actualizar datos en SQL Server si hay campos específicos
-        if (Object.keys(sqlFields).length > 0) {
-            const pool = await poolPromise;
-            
-            // Construir query dinámicamente
-            const setClause = Object.keys(sqlFields)
-                .map(key => `${key} = @${key}`)
-                .join(', ');
-            
-            if (setClause) {
-                const request = pool.request().input('id_usuario', mongoUser.sqlUserId);
-                
-                Object.entries(sqlFields).forEach(([key, value]) => {
-                    request.input(key, value);
-                });
-                
-                await request.query(`
-                    UPDATE usuarios 
-                    SET ${setClause}
-                    WHERE id_usuario = @id_usuario
-                `);
-            }
-        }
-
-        res.json({
-            success: true,
-            message: "Perfil actualizado exitosamente",
-            user: mongoUser
-        });
-    } catch (error) {
-        console.error('Error al actualizar perfil:', error);
-        res.status(500).json({
-            success: false,
-            error: "Error interno del servidor"
-        });
+    // 2.a) Avatar: guardamos SOLO el buffer (req.file.buffer)
+    if (req.file && req.file.buffer) {
+      updateData.avatar = req.file.buffer;
     }
+
+    // 2.b) Preferencias (llega como string JSON)
+    if (body.preferencias) {
+      try {
+        updateData.preferencias = JSON.parse(body.preferencias);
+      } catch {
+        return res.status(400).json({
+          success: false,
+          error: 'Campo preferencias no es JSON válido'
+        });
+      }
+    }
+
+    // 2.c) Campos básicos de Mongo
+    if (body.nombre_usuario) updateData.nombre_usuario = body.nombre_usuario.trim();
+    if (body.correo)         updateData.correo         = body.correo.trim();
+
+    // 3) Actualizar en MongoDB
+    const mongoUser = await User.findByIdAndUpdate(
+      req.user.userId,
+      { $set: updateData },
+      { new: true, runValidators: true }
+    ).select('-contrasena -sesiones');
+
+    // 4) Separar campos de la tabla "usuarios" (SQL)
+    const sqlUsuarios = {};
+    if (body.nombre_usuario) {
+      sqlUsuarios.nombre_usuario = body.nombre_usuario.trim();
+    }
+    if (body.correo) {
+      sqlUsuarios.correo_electronico = body.correo.trim();
+    }
+
+    // 5) Determinar tabla específica según tipo_usuario
+    let tablaEspecifica    = null;
+    let columnasPermitidas = [];
+    switch (mongoUser.tipo_usuario) {
+      case 'Integrante externo':
+        tablaEspecifica    = 'integrantes_externos';
+        columnasPermitidas = [
+          'nombres',
+          'apellidos',
+          'fecha_nacimiento',
+          'Email',
+          'PhoneNumber',
+          'descripcion'
+        ];
+        break;
+      case 'Empresa':
+        tablaEspecifica    = 'empresas';
+        columnasPermitidas = [
+          'nombre_empresa',
+          'NIT',
+          'direccion',
+          'telefono',
+          'sitio_web',
+          'descripcion'
+        ];
+        break;
+      case 'ONG':
+        tablaEspecifica    = 'ongs';
+        columnasPermitidas = [
+          'nombre_ong',
+          'NIT',
+          'direccion',
+          'telefono',
+          'sitio_web',
+          'descripcion'
+        ];
+        break;
+      default:
+        tablaEspecifica = null;
+    }
+
+    // 6) Construir objeto con campos específicos que llegaron en body
+    const sqlEspecifico = {};
+    if (tablaEspecifica) {
+      for (const col of columnasPermitidas) {
+        if (body[col] !== undefined && body[col] !== '') {
+          sqlEspecifico[col] = body[col];
+        }
+      }
+    }
+
+    // 7) Actualizar en SQL Server
+    const pool = await poolPromise;
+
+    // 7.a) Tabla "usuarios"
+    if (Object.keys(sqlUsuarios).length > 0) {
+      const setClauseUsu = Object.keys(sqlUsuarios)
+        .map(key => `${key} = @${key}`)
+        .join(', ');
+      const reqUsu = pool.request().input('id_usuario', mongoUser.sqlUserId);
+      for (const [k, v] of Object.entries(sqlUsuarios)) {
+        reqUsu.input(k, v);
+      }
+      await reqUsu.query(`
+        UPDATE usuarios
+           SET ${setClauseUsu}
+         WHERE id_usuario = @id_usuario
+      `);
+    }
+
+    // 7.b) Tabla específica
+    if (tablaEspecifica && Object.keys(sqlEspecifico).length > 0) {
+      const setClauseEsp = Object.keys(sqlEspecifico)
+        .map(key => `${key} = @${key}`)
+        .join(', ');
+      const reqEsp = pool.request().input('id_usuario', mongoUser.sqlUserId);
+      for (const [k, v] of Object.entries(sqlEspecifico)) {
+        reqEsp.input(k, v);
+      }
+      await reqEsp.query(`
+        UPDATE ${tablaEspecifica}
+           SET ${setClauseEsp}
+         WHERE id_usuario = @id_usuario
+      `);
+    }
+
+    // 8) Responder éxito
+    return res.json({
+      success: true,
+      message: 'Perfil actualizado exitosamente',
+      user: mongoUser
+    });
+  } catch (error) {
+    console.error('Error al actualizar perfil:', error);
+    return res.status(500).json({
+      success: false,
+      error: 'Error interno del servidor'
+    });
+  }
 };
+
+
+
 
 // Cambiar contraseña
 const changePassword = async (req, res) => {

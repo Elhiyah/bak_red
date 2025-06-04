@@ -33,6 +33,8 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
+
+
 // Rate limiting
 const limiter = rateLimit({
     windowMs: 10 * 60 * 1000,
@@ -72,12 +74,15 @@ const eventsRoutes = require('./routes/events.routes');
 app.use('/api/events', eventsRoutes);
 console.log('✅ Events routes');
 
-// Si tienes las rutas de mega eventos, descomenta:
-// const megaEventsRoutes = require('./routes/MegaEvents.routes');
-// app.use('/api/mega-events', megaEventsRoutes);
-// console.log('✅ Mega Events routes');
+const megaEventsRoutes = require('./routes/MegaEvents.routes');
+app.use('/api/events', megaEventsRoutes);
 
+const megaev= require('./routes/megaev.routes');
+app.use('/api/mega-events', megaev);
 console.log('🎯 Todas las rutas cargadas exitosamente');
+
+const patrocinadores= require('./routes/patrocinio.route');
+app.use('/api', patrocinadores);
 
 // RUTAS DE SISTEMA
 // Health check

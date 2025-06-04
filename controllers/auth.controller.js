@@ -23,11 +23,11 @@ const insertEmpresa = async (transaction, userId, data) => {
 };
 
 const insertONG = async (transaction, userId, data) => {
-    const { nombre_ONG, NIT, direccion, telefono, sitio_web, descripcion } = data;
+    const { nombre_ong, NIT, direccion, telefono, sitio_web, descripcion } = data;
     
     await transaction.request()
         .input('id_usuario', userId)
-        .input('nombre_ONG', nombre_ONG)
+        .input('nombre_ong', nombre_ong)
         .input('NIT', NIT)
         .input('direccion', direccion || null)
         .input('telefono', telefono || null)
@@ -35,8 +35,8 @@ const insertONG = async (transaction, userId, data) => {
         .input('descripcion', descripcion || null)
         .query(`
             INSERT INTO ONGS 
-            (id_usuario, nombre_ONG, NIT, direccion, telefono, sitio_web, descripcion)
-            VALUES (@id_usuario, @nombre_ONG, @NIT, @direccion, @telefono, @sitio_web, @descripcion)
+            (id_usuario, nombre_ong, NIT, direccion, telefono, sitio_web, descripcion)
+            VALUES (@id_usuario, @nombre_ong, @NIT, @direccion, @telefono, @sitio_web, @descripcion)
         `);
 };
 
@@ -131,6 +131,7 @@ const registerUser = async (req, res) => {
                     await insertEmpresa(transaction, newUserId, rest);
                     break;
                 case 'ONG':
+                    console.log('REST recibido para ONG:', rest);
                     await insertONG(transaction, newUserId, rest);
                     break;
                 case 'Integrante externo':
@@ -166,6 +167,12 @@ const registerUser = async (req, res) => {
             });
 
         } catch (error) {
+
+            console.error('❌ Error original en registro:', error);
+            if (error.precedingErrors && Array.isArray(error.precedingErrors)) {
+                console.error('❌ Detalle SQL:', error.precedingErrors);
+            }
+
             await transaction.rollback();
             
             // Si hay error, también eliminar de MongoDB si se creó
